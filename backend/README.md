@@ -1,209 +1,171 @@
-# PayEase Backend — MVP
+# PayEase Backend — Avalanche integration
 
-Convert USDC on Avalanche into prepaid virtual cards for global SaaS subscriptions.
+**Bridging DeFi and SaaS**: Convert USDC on Avalanche into prepaid virtual cards for global SaaS subscriptions.
 
-## Architecture
+## 🏆 Hackathon Submission Overview
 
+PayEase solves the problem of crypto-native users wanting to pay for everyday web2 SaaS services (like ChatGPT Plus, X Premium, Claude Pro) using their stablecoin holdings, without needing to offramp through centralized exchanges or traditional bank accounts.
+
+This backend powers the Avalanche C-Chain listener, the REST API for the frontend client, and the integration with the Reloadly Virtual Card API to issue programmable, single-use debit cards.
+
+## 🏗️ Architecture
+
+```mermaid
+flowchart TD
+    User([User]) -- "USDC Transfer" --> Treasury[Avalanche Treasury Wallet]
+    Listener[Blockchain Listener\n(Standalone Process)] -. "Polls Blocks" .-> Treasury
+    Listener -- "Matches Intent\n(3 Confirmations)" --> DB[(PostgreSQL)]
+    API[FastAPI Backend] -- "On-demand verification\n(Fallback)" --> Treasury
+    API -- "Creates Intent" --> DB
+    Listener -- "Triggers Card Issuance" --> Reloadly[Reloadly API]
+    API -- "Issues Request" --> Reloadly
+    Reloadly -- "Virtual Card Details" --> API
+    API -- "Encrypted Card stored,\ndelivered via API" --> DB
 ```
-User ──USDC──► Avalanche Treasury Wallet
-                      │
-              Blockchain Listener (standalone process)
-                      │ (3 confirmations)
-              Subscription Intent confirmed
-                      │
-              Reloadly Card Issued
-                      │
-              Encrypted card stored, delivered to user via API
-```
 
-## Services
+### Key Services
 
-| Service | Description |
-|---|---|
-| `api` | FastAPI REST API (uvicorn) |
-| `listener` | Avalanche block watcher (standalone Python process) |
-| `db` | PostgreSQL |
-| `redis` | Ready for Celery if you want to migrate listener later |
+| Service | Description | Tech Stack |
+|---|---|---|
+| `api` | Main REST API serving the frontend | FastAPI, Uvicorn, SQLAlchemy |
+| `listener` | Background process watching the Avalanche C-Chain for USDC transfers | Web3.py, Asyncio |
+| `db` | Relational database mapping intents, users, and encrypted cards | PostgreSQL, Asyncpg |
 
-## Quick Start
+## 🚀 Key Features
 
-### 1. Clone and configure
+*   **Non-Custodial Payments**: Users send standard USDC directly from their self-custodial wallets to the protocol treasury to fund their intents.
+*   **On-Chain Event Listener**: A standalone asynchronous script (`app.listeners.avalanche`) that watches for ERC-20 Transfer events in real-time, matching them to pending payment intents.
+*   **On-Demand On-Chain Verification**: In addition to the background listener, the backend provides an active `verify` endpoint to scan recent blocks and guarantee instant checkout flows for the end user if the background listener is delayed.
+*   **Idempotent Processing**: Uses database-level locks (`SELECT ... FOR UPDATE SKIP LOCKED`) and `tx_hash` unique constraints to completely eliminate the risk of double-processing or double-card issuance.
+*   **Secure Virtual Cards**: Card details (PAN, CVV) are encrypted at rest using AES (Fernet) and are designed to be revealed strictly **once** to the end user.
+*   **Crash Recovery**: The background listener saves `ListenerCheckpoint`s to the database. Upon restart, it resumes securely from the last processed Avalanche block, preventing missed payments.
+
+---
+
+## 🏁 Quick Start
+
+### 1. Requirements
+*   Docker & Docker Compose (Recommended)
+*   Python 3.11+ (If running bare-metal)
+*   PostgreSQL (If running bare-metal)
+
+### 2. Configure Environment
 
 ```bash
 cp .env.example .env
-# Fill in all values in .env
+# Fill in all necessary values in your .env file
 ```
 
-### 2. Generate a Fernet encryption key
+### 3. Generate Encryption Key
+The backend encrypts sensitive card data at rest. You must generate a Fernet key:
 
 ```bash
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-# Paste output as FIELD_ENCRYPTION_KEY in .env
 ```
+Place the output in `.env` as `FIELD_ENCRYPTION_KEY`.
 
-### 3. Start with Docker
+### 4. Run the Stack (Docker)
 
 ```bash
 docker-compose up --build
 ```
 
-### 4. Run migrations
+### 5. Run Database Migrations
 
 ```bash
 docker-compose exec api alembic upgrade head
 ```
 
-### 5. Test the API
-
-```
-http://localhost:8000/docs
-```
+The API will be available at `http://localhost:8000`. Full OpenAPI documentation can be found at `http://localhost:8000/docs`.
 
 ---
 
-## Running Without Docker
+## 🛠️ Bare-Metal Setup (Without Docker)
+
+If you prefer to run the services manually:
 
 ```bash
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
-# Run API
+# Run the REST API
 uvicorn app.main:app --reload --port 8000
 
-# Run listener (separate terminal)
+# Run the Avalanche Listener (in a separate terminal)
 python -m app.listeners.avalanche
 ```
 
 ---
 
-## API Reference
+## 📖 API Reference
 
 ### Auth
-
 | Method | Endpoint | Description |
 |---|---|---|
-| POST | `/auth/register` | Create account |
-| POST | `/auth/login` | Get JWT token |
-| GET | `/auth/me` | Current user info |
+| POST | `/auth/register` | Create a new user account |
+| POST | `/auth/login` | Authenticate and obtain JWT token |
+| GET | `/auth/me` | Fetch current user profile |
 
 ### Services
-
 | Method | Endpoint | Description |
 |---|---|---|
-| GET | `/services` | List available SaaS services |
-| GET | `/services/{id}` | Get service details |
+| GET | `/services` | List available SaaS subscription services |
+| GET | `/services/{id}` | Get specific service details |
 
-### Subscriptions
-
+### Subscriptions (Intents)
 | Method | Endpoint | Description |
 |---|---|---|
-| POST | `/subscriptions/intent` | Create payment intent |
-| GET | `/subscriptions/intent/{id}` | Poll intent status |
-| GET | `/subscriptions/intents` | List all user intents |
+| POST | `/subscriptions/intent` | Create a new payment intent |
+| GET | `/subscriptions/intent/{id}` | Poll payment intent status |
+| POST | `/subscriptions/intent/{id}/verify` | **On-demand blockchain verification** for instant settlement |
+| GET | `/subscriptions/intents` | List all historical user intents |
 
 **Create intent request:**
 ```json
 {
   "service_id": "uuid",
-  "wallet_address": "0x..."
+  "wallet_address": "0xUserWalletAddress"
 }
 ```
 
-**Response:**
-```json
-{
-  "intent_id": "uuid",
-  "treasury_wallet": "0xYOUR_TREASURY",
-  "exact_amount": "8.000347",
-  "expiry_time": "2024-01-01T00:15:00Z",
-  "service_name": "X Premium",
-  "status": "pending"
-}
-```
-
-User must send **exactly** `exact_amount` USDC to `treasury_wallet` from their registered `wallet_address` within 15 minutes.
+**Workflow:**
+Upon creating an intent, the exact required USDC amount (e.g., `8.000347`) and the `treasury_wallet` are returned. The user must send **exactly** this amount from their registered wallet address within 15 minutes. The fractional offset uniquely identifies the payment on-chain without requiring smart contract memos.
 
 ### Cards
-
 | Method | Endpoint | Description |
 |---|---|---|
-| GET | `/cards` | List user's cards (masked) |
-| GET | `/cards/{id}/reveal` | **One-time** reveal of full card + CVV |
-| GET | `/cards/dashboard/history` | Full transaction history |
+| GET | `/cards` | List all user virtual cards (masked details only) |
+| GET | `/cards/{id}/reveal` | **One-time** reveal of full card PAN & CVV. Payload deleted after. |
+| GET | `/cards/dashboard/history` | Full transaction and payment history |
 
 ### Webhooks
-
 | Method | Endpoint | Description |
 |---|---|---|
-| POST | `/webhooks/reloadly/card-transaction` | Reloadly card charge event |
+| POST | `/webhooks/reloadly/card-transaction` | Receiver for Reloadly external events. Marks card as `used` upon first charge. |
 
 ---
 
-## Key Design Decisions
-
-### Unique Amount Tracking
-Since Avalanche ERC-20 transfers have no memo field, payments are matched by:
-- `from` address (user's registered wallet)
-- `to` address (treasury wallet)
-- **exact amount** (base price + tiny random fractional offset, e.g. `$8.000347`)
-
-### Single-Use Cards
-- Card loaded with exact subscription amount
-- Sensitive data (card number, CVV) encrypted with Fernet at rest
-- `/cards/{id}/reveal` decrypts and returns data **once**, then clears encrypted fields from DB
-- Reloadly webhook marks card `used` on first charge
-
-### Listener Crash Recovery
-The `listener_checkpoints` table stores the last processed block. On restart, the listener resumes from that block. Checkpoints are saved after every batch.
-
-### Idempotency Guards
-- `tx_hash` unique constraint prevents double-processing
-- `SELECT ... FOR UPDATE SKIP LOCKED` on intent matching
-- Duplicate card issuance check before calling Reloadly
-- Intent status must be `confirmed` before card issuance proceeds
-
----
-
-## Environment Variables
+## 🌐 Environment Variables
 
 | Variable | Description |
 |---|---|
 | `SECRET_KEY` | JWT signing key (generate randomly) |
-| `DATABASE_URL` | Async PostgreSQL URL |
-| `SYNC_DATABASE_URL` | Sync PostgreSQL URL (for Alembic) |
-| `AVALANCHE_RPC_URL` | Your Avalanche C-Chain RPC endpoint |
-| `USDC_CONTRACT_ADDRESS` | USDC contract on Avalanche (default: mainnet) |
-| `TREASURY_WALLET_ADDRESS` | Your receiving wallet address |
-| `RELOADLY_CLIENT_ID` | Reloadly API client ID |
-| `RELOADLY_CLIENT_SECRET` | Reloadly API client secret |
-| `FIELD_ENCRYPTION_KEY` | Fernet key for card data encryption |
+| `DATABASE_URL` | Async PostgreSQL connection string |
+| `SYNC_DATABASE_URL` | Sync PostgreSQL connection string (required for Alembic) |
+| `AVALANCHE_RPC_URL` | Avalanche C-Chain RPC endpoint |
+| `USDC_CONTRACT_ADDRESS` | USDC token contract on Avalanche |
+| `TREASURY_WALLET_ADDRESS` | Protocol treasury receiving wallet |
+| `RELOADLY_CLIENT_ID` | Reloadly Sandbox/Production API Client ID |
+| `RELOADLY_CLIENT_SECRET` | Reloadly Sandbox/Production API Client Secret |
+| `RELOADLY_WEBHOOK_SECRET`| Secret used to verify Reloadly signatures |
+| `FIELD_ENCRYPTION_KEY` | Symmetric key for database-level card encryption |
 
 ---
 
-## Adding New Services
+## 🧪 Testing
 
-Insert a row into the `services` table:
-
-```sql
-INSERT INTO services (id, name, slug, price_usd, description, is_active, created_at)
-VALUES (gen_random_uuid(), 'Claude Pro', 'claude-pro', 20.00, 'Claude AI Pro plan', true, NOW());
-```
-
----
-
-## Integrating Paycrest (Future)
-
-When ready to automate USDC → fiat conversion:
-
-1. After `intent.status = confirmed`, call Paycrest API with the USDC amount
-2. Paycrest converts USDC → NGN and funds your Reloadly wallet
-3. Then call Reloadly to issue card
-4. Make the treasury service module in `app/services/treasury.py`
-
----
-
-## Tests
+The backend suite is fully tested using `pytest` and `pytest-asyncio`.
 
 ```bash
 pytest tests/ -v
@@ -211,12 +173,11 @@ pytest tests/ -v
 
 ---
 
-## Production Checklist
+## 🚢 Integrating Paycrest (Future Roadmap)
 
-- [ ] Set `APP_ENV=production` (disables `/docs`)
-- [ ] Use a secrets manager (AWS Secrets Manager, etc.) instead of `.env`
-- [ ] Set up Reloadly webhook URL and verify signature header
-- [ ] Monitor `unallocated` intents — these are late payments needing manual refund
-- [ ] Alert if treasury Reloadly wallet balance drops below threshold
-- [ ] Run listener behind a process supervisor (systemd, supervisord)
-- [ ] Set up database connection pooling (PgBouncer) for high traffic
+To fully decentralize and automate the fiat off-ramping component:
+
+1. After `intent.status == confirmed`, trigger the Paycrest API passing the collected USDC.
+2. Paycrest converts the USDC → Local Fiat (e.g. NGN) and funds the connected virtual card issuer.
+3. Reloadly is called to mint the card based on the available fiat balance.
+4. Logic can be extended in `app/services/treasury.py` for seamless execution.
